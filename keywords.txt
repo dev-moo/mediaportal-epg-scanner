@@ -1,0 +1,10 @@
+news
+weather
+current affairs
+python
+github
+raspberry pi
+arduino
+computer progamming
+coding
+catalyst
