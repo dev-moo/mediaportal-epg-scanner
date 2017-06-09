@@ -1,321 +1,384 @@
 #!/usr/bin/python
 
+"""
+
+Takes a list of keywords
+Scans Mediaportal Database for TV program titles and descriptions
+containing those keywords
+Sends list of those programs as email
+
+"""
+
+import MySQLdb
 import ConfigParser
 import os
-import MySQLdb
 import datetime
-import sys
+import collections
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 #Globals
-ConfigFile = 'scan_epg.conf'
+CONFIG_FILE = 'scan_epg.conf'
 
-class General_Settings(object):
+#Container to store general settings
+GeneralSettings = collections.namedtuple(
+    'GeneralSettings',
+    'keyword_file results_file'
+    )
 
-	def __init__(self):
-		self.KeyWordFile = ''
-		self.ResultsFile = ''
+#Container to store mediaportal mysql db connection settings
+MediaPortalSettings = collections.namedtuple(
+    'MediaPortalSettings',
+    'mp_sql_server mp_sql_user mp_sql_pw mp_sql_db mp_web_interface'
+    )
 
-class MediaPortal_Settings(object):
-
-	def __init__(self):
-		self.MPSQLServer = ''
-		self.MPSQLUser = ''
-		self.MPSQLPW = ''
-		self.MPSQLDB = '' 
-		self.MPWebInterface = ''
-		
-class Email_Settings(object):
-
-	def __init__(self):
-		self.username = ''
-		self.password = ''
-		recipients = []
-		sender = ''
-		subject = ''
-		server = ''
-		port = 25
+#Container to store email settings
+EmailSettings = collections.namedtuple(
+    'EmailSettings',
+    'username password recipients sender subject server port'
+    )
 
 
-		
+#Functions
 
-def GetConfig():
-	
-	config = ConfigParser.ConfigParser()
-	
-	# Check config file exists and can be accessed, then open
-	try:
-		dir = os.path.dirname(os.path.abspath(__file__))
-		filepath = dir + '/' + ConfigFile
+def get_config():
 
-		if not os.path.isfile(filepath):
-			print ("Error - Missing Config File: %s" % (ConfigFile))
-			raise IOError('Config file does not exist')
-			
-		config.read(filepath)
-		
-	except:
-		print ("Error - Unable to access config file: %s" % (ConfigFile))
-		exit()
+    """Get config from config file and store settings into namedtuples"""
 
-	
-	gen_settings = General_Settings()
-	mp_settings = MediaPortal_Settings()
-	email_settings = Email_Settings()
-	
-	#Get config		
-	gen_settings.KeyWordFile = config.get('General', 'KeyWordFile')
-	gen_settings.ResultsFile = config.get('General', 'ResultsFile')
+    config = ConfigParser.ConfigParser()
 
-	mp_settings.MPSQLServer = config.get('MediaPortal', 'MPSQLServer')
-	mp_settings.MPSQLUser = config.get('MediaPortal', 'MPSQLUser')
-	mp_settings.MPSQLPW = config.get('MediaPortal', 'MPSQLPW')
-	mp_settings.MPSQLDB = config.get('MediaPortal', 'MPSQLDB')
-	mp_settings.MPWebInterface = config.get('MediaPortal', 'MPWebInterface')
+    # Check config file exists and can be accessed, then open
+    try:
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        filepath = this_dir + '/' + CONFIG_FILE
 
-	email_settings.username = config.get('Email', 'username')
-	email_settings.password = config.get('Email', 'password')
-	email_settings.recipients = config.get('Email', 'recipients').split(',')
-	email_settings.sender = config.get('Email', 'sender')
-	email_settings.subject = config.get('Email', 'subject')
-	email_settings.server = config.get('Email', 'server')
-	email_settings.port = int(config.get('Email', 'port'))
-	
-		
-	return gen_settings, mp_settings, email_settings
+        if not os.path.isfile(filepath):
+            print "Error - Missing Config File: %s" % (CONFIG_FILE)
+            raise IOError('Config file does not exist')
 
-	
+        config.read(filepath)
 
-def GetListFromTextFile(config):
-
-	kwfile = None
-	
-	#Open keyword file
-	try:
-		kwfile = open(config.KeyWordFile, 'r')
-	except:
-		print 'Unable to open keyword file'
-		exit()
-	
-	lst = []
-	
-	for line in kwfile:
-		lst.append(line.rstrip('\r''\n'))
-		
-	return lst
+    except IOError:
+        print "Error - Unable to access config file: %s" % (CONFIG_FILE)
+        exit()
 
 
-def GenerateSQLQuery(terms):
-	
-	query = 'SELECT * FROM (select * from program where <QUERY>) as tmp ORDER BY startTime ASC;'
-	
-	q = ''
-	
-	max = len(terms)
-	
-	for i in range(0, max):
+    #Get config
 
-		q += "title like '%%%s%%'"" or description like '%%%s%%'" % (terms[i], terms[i])
-		
-		if i < max-1:
-			q += ' or '
-	
-	query = query.replace('<QUERY>', q)
-	
-	return query
-	
+    gen_settings = GeneralSettings(
+        keyword_file=config.get('General', 'KeyWordFile'),
+        results_file=config.get('General', 'ResultsFile')
+        )
 
+    mp_settings = MediaPortalSettings(
+        mp_sql_server=config.get('MediaPortal', 'MPSQLServer'),
+        mp_sql_user=config.get('MediaPortal', 'MPSQLUser'),
+        mp_sql_pw=config.get('MediaPortal', 'MPSQLPW'),
+        mp_sql_db=config.get('MediaPortal', 'MPSQLDB'),
+        mp_web_interface=config.get('MediaPortal', 'MPWebInterface')
+        )
 
-def ConnectToSQL(config):
-	
-	d=None
-	
-	try:
-		d = MySQLdb.connect(host=config.MPSQLServer,
-							user=config.MPSQLUser,
-							passwd=config.MPSQLPW,
-							db=config.MPSQLDB)
-	except:
-		print "Unable to connect to SQL DB"
-		exit()
-	
-	return d
+    email_settings = EmailSettings(
+        username=config.get('Email', 'username'),
+        password=config.get('Email', 'password'),
+        recipients=config.get('Email', 'recipients').split(','),
+        sender=config.get('Email', 'sender'),
+        server=config.get('Email', 'server'),
+        port=int(config.get('Email', 'port'))
+        )
+
+    return gen_settings, mp_settings, email_settings
 
 
-	
-def ExecuteSQLQuery(db, query):
-	
-	cur = db.cursor()
-	
-	cur.execute(query)
-	
-	return cur.fetchall()
+
+def get_list_from_text_file(config):
+
+    """
+    Get list of keywords from text file
+    Convert keyword list into a List
+    """
+
+    kwfile = None
+
+    #Open keyword file
+    try:
+        kwfile = open(config.keyword_file, 'r')
+    except IOError:
+        print 'Unable to open keyword file'
+        exit()
+
+    lst = []
+
+    for line in kwfile:
+        lst.append(line.rstrip('\r''\n'))
+
+    return lst
 
 
-	
-def CheckTime(tyme):
-		
-	if tyme < datetime.datetime.now():
-		return None
-		
-	return str(tyme)
+def generate_sql_query(terms):
+
+    """return a SQL query from list of keywords"""
+
+    num_terms = len(terms)
+
+    query_contents = ''
+
+    for i in range(0, max):
+
+        query_contents += ("title like '%%%s%%'"" or description like '%%%s%%'"
+                           % (terms[i], terms[i]))
+
+        if i < num_terms-1:
+            query_contents += ' or '
+
+    query = ("SELECT * FROM (select * from program where %s)"
+             "as tmp ORDER BY startTime ASC;" % query_contents)
+
+    return query
 
 
-	
-def OrganiseInfo(table, db):
-	
-	dict = {}
-	ChannelNames = {}
-	
-	
-	for row in table:
-		
-		ID = row[0]
-		channel_code = row[1]
-		date = CheckTime(row[2])
-		title = row[4]
-		description = row[5]
-		
-		channel_name = None
-		
-		if channel_code in ChannelNames:
-			channel_name = ChannelNames[channel_code]
-		else:			
-			isVisable = ExecuteSQLQuery(db, "select visibleInGuide from mptvdb.channel where idChannel = '%d'" % (channel_code))[0][0]
-			
-			if isVisable == '\x01':
-				channel_name = ExecuteSQLQuery(db, "select displayName from mptvdb.channel where idChannel = '%d'" % (channel_code))[0][0]
-				ChannelNames[channel_code] = channel_name
-			else:
-				ChannelNames[channel_code] = None
-				
-		
-		if date and channel_name:
-		
-			if title in dict:
-				tmp = dict[title]
-				tmp.append({'Date': date, 'Channel': channel_name, 'ID': ID, 'Description': description})
-				dict[title] = tmp
-			
-			else:
-				dict[title] = [{'Date': date, 'Channel': channel_name, 'ID': ID, 'Description': description}]
-	
-	
-	return dict
 
-	
-def HighLight(str, wordlist):
-		
-	for w in wordlist:
-		
-		start = str.lower().find(w.lower())
-		end = start + len(w)
-		
-		if start != -1:
-			tmp = str[:start]
-			tmp += '<mark>'
-			tmp += str[start:end]
-			tmp += '</mark>'
-			tmp += HighLight(str[end:], [w])
+def connect_to_sql(config):
 
-			str = tmp
-			
-	return str
-	
-	
-def GenerateHTMLOutput(d, wordlist, config):
+    """
+    Connect to sql server
+    Return connection
+    """
 
-	html = '<html>\r\n<head>\r\n</head>\r\n<body>\r\n<font face="verdana">\r\n'
+    connection = None
 
-	for key in d:
-	
-		titleStr = HighLight(key, wordlist)
-		descriptionStr = HighLight(d[key][0]['Description'], wordlist)
-		
-		html += "\t<b>%s</b><br>\r\n\t" % (titleStr)
+    try:
+        connection = MySQLdb.connect(host=config.mp_sql_server,
+                                     user=config.mp_sql_user,
+                                     passwd=config.mp_sql_pw,
+                                     db=config.mp_sql_db)
+    except:
+        print "Unable to connect to SQL DB"
+        exit()
 
-		for episode in d[key]:
-			
-			idStr = str(episode['ID'])
-			dateStr = str(episode['Date'])
-			channelStr = episode['Channel']
-			
-			html += "<font size=\"2\"><a href=\"http://%s/Television/ProgramDetails?programId=%s\">%s %s</a></font> " % (config.MPWebInterface, idStr, dateStr, channelStr)
+    return connection
 
-		html += "\r\n\t<br>%s<br><br>\r\n\r\n" % (descriptionStr)
 
-	
-	html += "</font>\r\n</body>\r\n</html>"
-	
-	return html
-	
-	
-	
-	
-def WriteToTextFile(output, config):
 
-	try:
-		f = open(config.ResultsFile, 'w')
-		f.write(output)
+def execute_sql_query(d_base, query):
 
-	except:
-	
-		print 'Unable to write to ResultsFile'
-	
-	
+    """
+    Execute a SQL query against the server and return the result as a Tuple
+    """
 
-def SendEmail(MessageText, config):
-	
-	msg = MIMEMultipart('alternative')
-	
-	msg['To'] = ", ".join(config.recipients)
-	msg['From'] = config.sender
-	msg['Subject'] = config.subject
-	
-	msg.attach(MIMEText(MessageText, 'html'))
-	
-	try:
-		s = smtplib.SMTP(config.server, config.port)
-		s.login(config.username, config.password)
-		s.sendmail(msg['From'], msg['To'], msg.as_string())
-		
-	except:
-		print 'Unable to send email'
-		
-	finally:
-		s.quit()
-	
+    cur = d_base.cursor()
+
+    cur.execute(query)
+
+    return cur.fetchall()
+
+
+
+def check_time(tyme):
+
+    """Return None if argument is older than current time"""
+
+    if tyme < datetime.datetime.now():
+        return None
+
+    return str(tyme)
+
+
+
+def organise_info(table, d_base):
+
+    """
+    Function to clean up Tuple returned from DB query
+    and return as a dictionary
+
+    Remove programs from channels which are disabled
+    Remove programs that started in the past
+    Replace channel code with name
+
+    Args:
+    Tuple of all returned results from DB query
+    Database connection
+
+    Returns:
+    Dictionary
+    """
+
+    program_list = {}
+    channel_names = {}
+
+
+    for row in table:
+
+        program_id = row[0]
+        channel_code = row[1]
+        date = check_time(row[2])
+        title = row[4]
+        description = row[5]
+
+        channel_name = None
+
+        if channel_code in channel_names:
+            channel_name = channel_names[channel_code]
+
+        else:
+            is_visable = (execute_sql_query(
+                d_base,
+                "select visibleInGuide from mptvdb.channel where idChannel = '%d'"
+                % (channel_code))[0][0])
+
+            if is_visable == '\x01':
+                channel_name = (execute_sql_query(
+                    d_base,
+                    "select displayName from mptvdb.channel where idChannel = '%d'"
+                    % (channel_code))[0][0])
+
+                channel_names[channel_code] = channel_name
+
+            else:
+                channel_names[channel_code] = None
+
+
+        if date and channel_name:
+
+            if title in program_list:
+                tmp = program_list[title]
+                tmp.append(
+                    {'Date': date, 'Channel': channel_name,
+                     'ID': program_id, 'Description': description}
+                    )
+
+                program_list[title] = tmp
+
+            else:
+                program_list[title] = [
+                    {'Date': date, 'Channel': channel_name,
+                     'ID': program_id, 'Description': description}
+                    ]
+
+    return program_list
+
+
+def highlight(html_str, wordlist):
+
+    """Highlight words in HTML"""
+
+    for word in wordlist:
+
+        start = html_str.lower().find(word.lower())
+        end = start + len(word)
+
+        if start != -1:
+            tmp = html_str[:start]
+            tmp += '<mark>'
+            tmp += html_str[start:end]
+            tmp += '</mark>'
+            tmp += highlight(html_str[end:], [word])
+
+            html_str = tmp
+
+    return html_str
+
+
+def generate_html_output(program_dict, wordlist, config):
+
+    """Convert dictionary into HTML for viewing"""
+
+    html = '<html>\r\n<head>\r\n</head>\r\n<body>\r\n<font face="verdana">\r\n'
+
+    for key in program_dict:
+
+        title_str = highlight(key, wordlist)
+        description_str = highlight(program_dict[key][0]['Description'], wordlist)
+
+        html += "\t<b>%s</b><br>\r\n\t" % (title_str)
+
+        for episode in program_dict[key]:
+
+            id_str = str(episode['ID'])
+            date_str = str(episode['Date'])
+            channel_str = episode['Channel']
+
+            html += ("<font size=\"2\">"
+                     "<a href=\"http://%s/Television/ProgramDetails?programId=%s\">"
+                     "%s %s</a></font> "
+                     % (config.mp_web_interface, id_str, date_str, channel_str))
+
+        html += "\r\n\t<br>%s<br><br>\r\n\r\n" % (description_str)
+
+
+    html += "</font>\r\n</body>\r\n</html>"
+
+    return html
+
+
+
+
+def write_to_text_file(output, config):
+
+    """Write output to text file"""
+
+    try:
+        output_file = open(config.results_file, 'w')
+        output_file.write(output)
+
+    except IOError:
+
+        print 'Unable to write to results_file'
+
+
+
+def send_email(message_contents, config):
+
+    """Send output as email"""
+
+    msg = MIMEMultipart('alternative')
+
+    msg['To'] = ", ".join(config.recipients)
+    msg['From'] = config.sender
+    msg['Subject'] = config.subject
+
+    msg.attach(MIMEText(message_contents, 'html'))
+
+    try:
+        smtp_email = smtplib.SMTP(config.server, config.port)
+        smtp_email.login(config.username, config.password)
+        smtp_email.sendmail(msg['From'], msg['To'], msg.as_string())
+
+    except:
+        print 'Unable to send email'
+
+    finally:
+        smtp_email.quit()
+
 
 
 #MAIN
 if __name__ == "__main__":
-	
-	#Get settings
-	gen_config, mp_config, email_config = GetConfig()
-	
-	#Convert keyword text file into a List
-	KeyWordList = GetListFromTextFile(gen_config)
-	
-	#Generate SQL query from keywords
-	SQLQuery = GenerateSQLQuery(KeyWordList)
 
-	#Connect to MySQL
-	database = ConnectToSQL(mp_config)	
-	
-	#Get Tuple containing response from SQL query
-	programs = ExecuteSQLQuery(database, SQLQuery)
+    #Get settings
+    GEN_CONFIG, MP_CONFIG, EMAIL_CONFIG = get_config()
 
-	#Organise Tuple into a Dictionary
-	TitleDict = OrganiseInfo(programs, database)
+    #Convert keyword text file into a List
+    KEYWORDLIST = get_list_from_text_file(GEN_CONFIG)
 
-	#Generate some HTML to send as email
-	HyperText = GenerateHTMLOutput(TitleDict, KeyWordList, mp_config)
+    #Generate SQL query from keywords
+    SQL_QUERY = generate_sql_query(KEYWORDLIST)
 
-	#Output HTML to text file
-	WriteToTextFile(HyperText, gen_config)
+    #Connect to MySQL
+    DATABASE = connect_to_sql(MP_CONFIG)
 
-	#Email HTML
-	SendEmail(HyperText, email_config)
-	
+    #Get Tuple containing response from SQL query
+    PROGRAMS = execute_sql_query(DATABASE, SQL_QUERY)
+
+    #Organise Tuple into a Dictionary
+    TITLE_DICT = organise_info(PROGRAMS, DATABASE)
+
+    #Generate some HTML to send as email
+    HYPERTEXT = generate_html_output(TITLE_DICT, KEYWORDLIST, MP_CONFIG)
+
+    #Output HTML to text file
+    write_to_text_file(HYPERTEXT, GEN_CONFIG)
+
+    #Email HTML
+    send_email(HYPERTEXT, EMAIL_CONFIG)
