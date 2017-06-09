@@ -84,6 +84,7 @@ def get_config():
         password=config.get('Email', 'password'),
         recipients=config.get('Email', 'recipients').split(','),
         sender=config.get('Email', 'sender'),
+        subject=config.get('Email', 'subject'),
         server=config.get('Email', 'server'),
         port=int(config.get('Email', 'port'))
         )
@@ -124,6 +125,8 @@ def generate_sql_query(terms):
 
     query_contents = ''
 
+    max = len(terms)
+    
     for i in range(0, max):
 
         query_contents += ("title like '%%%s%%'"" or description like '%%%s%%'"
